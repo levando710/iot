@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+{% block title %}Sửa sinh viên | KTX Dashboard{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Sửa sinh viên {{ student.id_sinhvien }}</h1>
+
+<div class="card">
+    <div class="card-body">
+        <form method="post" action="{{ url_for('students_edit', student_id=student.id_sinhvien) }}" class="row g-3" enctype="multipart/form-data">
+            <div class="col-md-3">
+                <label class="form-label">ID sinh viên</label>
+                <input class="form-control" value="{{ student.id_sinhvien }}" disabled>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Họ tên</label>
+                <input class="form-control" name="ho_ten" value="{{ student.ho_ten }}" required>
+            </div>
+            <div class="col-md-5">
+                <label class="form-label">Đường dẫn ảnh</label>
+                <input class="form-control" name="duong_dan_anh" value="{{ student.duong_dan_anh }}" required>
+                <div class="form-text">Có thể giữ nguyên hoặc upload ảnh mới bên dưới.</div>
+            </div>
+            <div class="col-md-5">
+                <label class="form-label">Upload ảnh mới (tuỳ chọn)</label>
+                <input class="form-control" type="file" name="face_image" accept=".jpg,.jpeg,.png,.bmp,.webp">
+                <div class="form-text">Nếu chọn file mới, hệ thống sẽ ghi đè ảnh theo tên `{{ student.id_sinhvien }}`.</div>
+            </div>
+            <div class="col-12 d-flex gap-2">
+                <button class="btn btn-primary" type="submit">Lưu thay đổi</button>
+                <a class="btn btn-outline-secondary" href="{{ url_for('students_page') }}">Quay lại</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

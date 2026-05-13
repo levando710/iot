@@ -1,0 +1,68 @@
+{% extends 'base.html' %}
+{% block title %}Sinh viên | KTX Dashboard{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">Quản lý sinh viên</h1>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header">Thêm sinh viên</div>
+    <div class="card-body">
+        <form method="post" action="{{ url_for('students_create') }}" class="row g-3" enctype="multipart/form-data">
+            <div class="col-md-3">
+                <label class="form-label">ID sinh viên</label>
+                <input class="form-control" name="id_sinhvien" required>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Họ tên</label>
+                <input class="form-control" name="ho_ten" required>
+            </div>
+            <div class="col-md-5">
+                <label class="form-label">Ảnh khuôn mặt</label>
+                <input class="form-control" type="file" name="face_image" accept=".jpg,.jpeg,.png,.bmp,.webp" required>
+                <div class="form-text">Ảnh sẽ tự đặt tên theo MSV (ví dụ `B21DCCN001.jpg`) và lưu vào `database_khuonmat`.</div>
+            </div>
+            <div class="col-12">
+                <button class="btn btn-primary" type="submit">Thêm sinh viên</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">Danh sách sinh viên</div>
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Họ tên</th>
+                    <th>Đường dẫn ảnh</th>
+                    <th>Số xe</th>
+                    <th class="text-end">Thao tác</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for sv in students %}
+                <tr>
+                    <td>{{ sv.id_sinhvien }}</td>
+                    <td>{{ sv.ho_ten }}</td>
+                    <td class="small text-break">{{ sv.duong_dan_anh }}</td>
+                    <td>{{ sv.so_xe }}</td>
+                    <td class="text-end">
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('students_edit_page', student_id=sv.id_sinhvien) }}">Sửa</a>
+                        <form method="post" action="{{ url_for('students_delete', student_id=sv.id_sinhvien) }}" class="d-inline" onsubmit="return confirm('Xóa sinh viên {{ sv.id_sinhvien }}?');">
+                            <button class="btn btn-sm btn-outline-danger" type="submit">Xóa</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="5" class="text-center text-muted">Chưa có sinh viên</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

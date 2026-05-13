@@ -1,0 +1,74 @@
+{% extends 'base.html' %}
+{% block title %}Phương tiện | KTX Dashboard{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Quản lý phương tiện</h1>
+
+<div class="card mb-4">
+    <div class="card-header">Thêm phương tiện</div>
+    <div class="card-body">
+        <form method="post" action="{{ url_for('vehicles_create') }}" class="row g-3">
+            <div class="col-md-3">
+                <label class="form-label">Biển số</label>
+                <input class="form-control" name="bien_so" placeholder="30A12345" required>
+            </div>
+            <div class="col-md-5">
+                <label class="form-label">Sinh viên sở hữu</label>
+                <select class="form-select" name="id_sinhvien" required>
+                    <option value="">-- Chọn sinh viên --</option>
+                    {% for sv in students %}
+                    <option value="{{ sv.id_sinhvien }}">{{ sv.id_sinhvien }} - {{ sv.ho_ten }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Trạng thái</label>
+                <select class="form-select" name="trang_thai" required>
+                    {% for status in status_options %}
+                    <option value="{{ status }}">{{ status }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12">
+                <button class="btn btn-primary" type="submit">Thêm phương tiện</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">Danh sách phương tiện</div>
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>Biển số</th>
+                    <th>ID sinh viên</th>
+                    <th>Họ tên</th>
+                    <th>Trạng thái</th>
+                    <th class="text-end">Thao tác</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for xe in vehicles %}
+                <tr>
+                    <td>{{ xe.bien_so }}</td>
+                    <td>{{ xe.id_sinhvien }}</td>
+                    <td>{{ xe.ho_ten or '-' }}</td>
+                    <td><span class="badge text-bg-info">{{ xe.trang_thai }}</span></td>
+                    <td class="text-end">
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('vehicles_edit_page', plate=xe.bien_so) }}">Sửa</a>
+                        <form method="post" action="{{ url_for('vehicles_delete', plate=xe.bien_so) }}" class="d-inline" onsubmit="return confirm('Xóa xe {{ xe.bien_so }}?');">
+                            <button class="btn btn-sm btn-outline-danger" type="submit">Xóa</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="5" class="text-center text-muted">Chưa có phương tiện</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

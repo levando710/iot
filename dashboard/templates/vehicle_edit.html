@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block title %}Sửa phương tiện | KTX Dashboard{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Sửa phương tiện {{ vehicle.bien_so }}</h1>
+
+<div class="card">
+    <div class="card-body">
+        <form method="post" action="{{ url_for('vehicles_edit', plate=vehicle.bien_so) }}" class="row g-3">
+            <div class="col-md-3">
+                <label class="form-label">Biển số</label>
+                <input class="form-control" value="{{ vehicle.bien_so }}" disabled>
+            </div>
+            <div class="col-md-5">
+                <label class="form-label">Sinh viên sở hữu</label>
+                <select class="form-select" name="id_sinhvien" required>
+                    {% for sv in students %}
+                    <option value="{{ sv.id_sinhvien }}" {% if sv.id_sinhvien == vehicle.id_sinhvien %}selected{% endif %}>
+                        {{ sv.id_sinhvien }} - {{ sv.ho_ten }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Trạng thái</label>
+                <select class="form-select" name="trang_thai" required>
+                    {% for status in status_options %}
+                    <option value="{{ status }}" {% if status == vehicle.trang_thai %}selected{% endif %}>{{ status }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12 d-flex gap-2">
+                <button class="btn btn-primary" type="submit">Lưu thay đổi</button>
+                <a class="btn btn-outline-secondary" href="{{ url_for('vehicles_page') }}">Quay lại</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
