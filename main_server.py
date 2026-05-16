@@ -92,6 +92,14 @@ def _resolve_camera_source(url_value: str, index_value: Optional[int]) -> object
     return CAMERA_INDEX
 
 
+def _create_video_capture(source: object) -> cv2.VideoCapture:
+    if isinstance(source, int):
+        if os.name == "nt":
+            return cv2.VideoCapture(source, cv2.CAP_DSHOW)
+        return cv2.VideoCapture(source)
+    return cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+
+
 CAMERA_KTX_IN_URL = os.getenv("CAMERA_KTX_IN_URL", "").strip()
 CAMERA_KTX_IN_INDEX = _read_int_env("CAMERA_KTX_IN_INDEX")
 CAMERA_KTX_OUT_URL = os.getenv("CAMERA_KTX_OUT_URL", "").strip()
@@ -120,6 +128,11 @@ CAMERA_DISABLE_STREAM_KEYS = {
 CAMERA_OPEN_TIMEOUT_MS = int(os.getenv("CAMERA_OPEN_TIMEOUT_MS", "10000"))
 CAMERA_READ_TIMEOUT_MS = int(os.getenv("CAMERA_READ_TIMEOUT_MS", "10000"))
 CAMERA_BUFFER_SIZE = int(os.getenv("CAMERA_BUFFER_SIZE", "1"))
+CAMERA_CACHE_MAX_AGE_MS = int(os.getenv("CAMERA_CACHE_MAX_AGE_MS", "5000"))
+CAMERA_DEBUG_SAVE_FRAMES = os.getenv("CAMERA_DEBUG_SAVE_FRAMES", "0").strip().lower() in {"1", "true", "yes", "on"}
+CAMERA_DEBUG_SAVE_INTERVAL_MS = max(100, int(os.getenv("CAMERA_DEBUG_SAVE_INTERVAL_MS", "2000")))
+CAMERA_DEBUG_DIR = os.path.join(BASE_DIR, "debug_camera")
+CAMERA_MJPEG_MAX_BYTES = int(os.getenv("CAMERA_MJPEG_MAX_BYTES", "2000000"))
 
 CAMERA_SOURCES: Dict[str, object] = {
     "ktx_in": _resolve_camera_source(CAMERA_KTX_IN_URL, CAMERA_KTX_IN_INDEX),
@@ -144,6 +157,7 @@ VOICE_GUIDE_RATE = int(os.getenv("VOICE_GUIDE_RATE", "160"))
 VOICE_GUIDE_VOLUME = float(os.getenv("VOICE_GUIDE_VOLUME", "1.0"))
 FACE_RETRY_COUNT = max(1, int(os.getenv("FACE_RETRY_COUNT", "3")))
 FACE_RETRY_INTERVAL_MS = max(0, int(os.getenv("FACE_RETRY_INTERVAL_MS", "2500")))
+GATE_AUTO_CLOSE_TIMEOUT_MS = max(0, int(os.getenv("GATE_AUTO_CLOSE_TIMEOUT_MS", "12000")))
 
 # CloudMQTT config (đặt qua biến môi trường để không hard-code bí mật)
 MQTT_HOST = os.getenv("MQTT_HOST", "")
@@ -228,6 +242,7 @@ class SmartDormParkingServer:
             "baixe_vao_open": False,
             "baixe_ra_open": False,
         }
+        self.gate_auto_close_timers: Dict[str, threading.Timer] = {}
 
         # Voice guide (không block luồng chính)
         self.voice_queue: queue.Queue[str] = queue.Queue(maxsize=20)
@@ -240,6 +255,19 @@ class SmartDormParkingServer:
         # Camera: mỗi cổng có thể dùng nguồn riêng
         self.camera_locks = {name: threading.Lock() for name in CAMERA_SOURCES}
         self.camera_caps: Dict[str, Optional[cv2.VideoCapture]] = {name: None for name in CAMERA_SOURCES}
+        self.camera_cache_lock = threading.Lock()
+        self.camera_frames: Dict[str, Any] = {name: None for name in CAMERA_SOURCES}
+        self.camera_frame_times: Dict[str, Optional[datetime]] = {name: None for name in CAMERA_SOURCES}
+        self.camera_debug_last_save: Dict[str, Optional[datetime]] = {name: None for name in CAMERA_SOURCES}
+        self.camera_worker_threads = [
+            threading.Thread(
+                target=self._camera_worker_loop,
+                args=(name,),
+                name=f"Camera-Worker-{name}",
+                daemon=True,
+            )
+            for name in CAMERA_SOURCES
+        ]
 
         # Tải model theo kiểu lazy (chỉ load khi cần để giảm thời gian startup)
         self.plate_detector: Optional[Any] = None
@@ -340,6 +368,150 @@ class SmartDormParkingServer:
             "set" if MQTT_TLS_CA_CERT else "default",
         )
 
+    def _open_camera_capture(self, camera_key: str) -> Optional[cv2.VideoCapture]:
+        source = CAMERA_SOURCES.get(camera_key)
+        if source is None:
+            return None
+        if self._is_http_mjpeg_source(source):
+            return None
+        cap = _create_video_capture(source)
+        if CAMERA_BUFFER_SIZE > 0:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, CAMERA_BUFFER_SIZE)
+        if CAMERA_OPEN_TIMEOUT_MS > 0:
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, CAMERA_OPEN_TIMEOUT_MS)
+        if CAMERA_READ_TIMEOUT_MS > 0:
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, CAMERA_READ_TIMEOUT_MS)
+        if not cap.isOpened():
+            cap.release()
+            return None
+        return cap
+
+    @staticmethod
+    def _is_http_mjpeg_source(source: object) -> bool:
+        if not isinstance(source, str):
+            return False
+        lower = source.strip().lower()
+        return lower.startswith(("http://", "https://")) and (
+            "mjpeg" in lower or "mjpg" in lower or lower.endswith("/video")
+        )
+
+    def _capture_http_mjpeg_frame(self, camera_key: str):
+        source = CAMERA_SOURCES.get(camera_key)
+        if not self._is_http_mjpeg_source(source):
+            return None
+
+        data = bytearray()
+        try:
+            with urlopen(str(source).strip(), timeout=CAMERA_READ_TIMEOUT_MS / 1000) as response:
+                while len(data) < CAMERA_MJPEG_MAX_BYTES and not self.stop_event.is_set():
+                    chunk = response.read(4096)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    start = data.find(b"\xff\xd8")
+                    end = data.find(b"\xff\xd9", start + 2)
+                    if start >= 0 and end >= 0:
+                        jpg = bytes(data[start : end + 2])
+                        image_array = np.frombuffer(jpg, dtype=np.uint8)
+                        frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            return frame.copy()
+                        return None
+        except Exception as error:
+            self.logger.debug("Khong doc duoc MJPEG frame %s: %s", camera_key, error)
+        return None
+
+    def _cache_camera_frame(self, camera_key: str, frame) -> None:
+        with self.camera_cache_lock:
+            self.camera_frames[camera_key] = frame.copy()
+            self.camera_frame_times[camera_key] = datetime.now()
+        self._save_debug_camera_frame(camera_key, frame, "latest")
+
+    def _save_debug_camera_frame(self, camera_key: str, frame, suffix: str) -> None:
+        if not CAMERA_DEBUG_SAVE_FRAMES or frame is None:
+            return
+
+        now = datetime.now()
+        if suffix == "latest":
+            last_save = self.camera_debug_last_save.get(camera_key)
+            if last_save is not None:
+                age_ms = (now - last_save).total_seconds() * 1000
+                if age_ms < CAMERA_DEBUG_SAVE_INTERVAL_MS:
+                    return
+            self.camera_debug_last_save[camera_key] = now
+
+        try:
+            os.makedirs(CAMERA_DEBUG_DIR, exist_ok=True)
+            safe_suffix = re.sub(r"[^A-Za-z0-9_-]", "_", suffix)
+            output_path = os.path.join(CAMERA_DEBUG_DIR, f"{camera_key}_{safe_suffix}.jpg")
+            cv2.imwrite(output_path, frame)
+        except Exception as error:
+            self.logger.warning("Khong luu duoc debug frame %s/%s: %s", camera_key, suffix, error)
+
+    def _camera_worker_loop(self, camera_key: str) -> None:
+        self.logger.info("Camera worker da khoi dong cho camera=%s.", camera_key)
+
+        while not self.stop_event.is_set():
+            snapshot_url = CAMERA_SNAPSHOT_URLS.get(camera_key, "").strip()
+            use_snapshot_only = (
+                camera_key.lower() in CAMERA_DISABLE_STREAM_KEYS
+                or (CAMERA_SNAPSHOT_FIRST and bool(snapshot_url))
+            )
+            if use_snapshot_only:
+                frame = self._capture_snapshot_frame(camera_key)
+                if frame is not None:
+                    self._cache_camera_frame(camera_key, frame)
+                self.stop_event.wait(max(0.1, CAMERA_SNAPSHOT_TIMEOUT_MS / 1000.0))
+                continue
+
+            cap = self.camera_caps.get(camera_key)
+            if cap is None:
+                mjpeg_frame = self._capture_http_mjpeg_frame(camera_key)
+                if mjpeg_frame is not None:
+                    self._cache_camera_frame(camera_key, mjpeg_frame)
+                    self.stop_event.wait(0.03)
+                    continue
+
+                with self.camera_locks[camera_key]:
+                    cap = self._open_camera_capture(camera_key)
+                    self.camera_caps[camera_key] = cap
+                if cap is None:
+                    self.logger.warning("Chua mo duoc camera %s, thu lai sau 1s.", camera_key)
+                    self.stop_event.wait(1)
+                    continue
+
+            ok = False
+            frame = None
+            try:
+                with self.camera_locks[camera_key]:
+                    cap = self.camera_caps.get(camera_key)
+                    if cap is not None:
+                        ok, frame = cap.read()
+            except Exception as error:
+                self.logger.warning("Loi doc camera %s: %s", camera_key, error)
+
+            if ok and frame is not None:
+                self._cache_camera_frame(camera_key, frame)
+                self.stop_event.wait(0.01)
+                continue
+
+            with self.camera_locks[camera_key]:
+                cap = self.camera_caps.get(camera_key)
+                if cap is not None:
+                    cap.release()
+                self.camera_caps[camera_key] = None
+
+            mjpeg_frame = self._capture_http_mjpeg_frame(camera_key)
+            if mjpeg_frame is not None:
+                self._cache_camera_frame(camera_key, mjpeg_frame)
+                self.stop_event.wait(0.03)
+                continue
+
+            snapshot_frame = self._capture_snapshot_frame(camera_key)
+            if snapshot_frame is not None:
+                self._cache_camera_frame(camera_key, snapshot_frame)
+            self.stop_event.wait(0.5)
+
     # ==========================
     # PHẦN CHẠY CHÍNH
     # ==========================
@@ -348,6 +520,8 @@ class SmartDormParkingServer:
         try:
             self._validate_startup_requirements()
             self._open_cameras()
+            for thread in self.camera_worker_threads:
+                thread.start()
             self.ktx_worker_thread.start()
             self.parking_worker_thread.start()
             if self.voice_enabled_runtime:
@@ -387,12 +561,27 @@ class SmartDormParkingServer:
         if self.voice_thread.is_alive():
             self.voice_thread.join(timeout=2)
 
+        with self.gate_state_lock:
+            timers = list(self.gate_auto_close_timers.values())
+            self.gate_auto_close_timers.clear()
+        for timer in timers:
+            timer.cancel()
+
+        for thread in self.camera_worker_threads:
+            if thread.is_alive():
+                thread.join(timeout=2)
+
         for name, lock in self.camera_locks.items():
-            with lock:
+            if not lock.acquire(timeout=1):
+                self.logger.warning("Khong the lay lock de dong camera %s.", name)
+                continue
+            try:
                 cap = self.camera_caps.get(name)
                 if cap is not None:
                     cap.release()
                     self.camera_caps[name] = None
+            finally:
+                lock.release()
 
         cv2.destroyAllWindows()
         self.logger.info("Server đã dừng.")
@@ -525,7 +714,7 @@ class SmartDormParkingServer:
                 continue
             lock = self.camera_locks[name]
             with lock:
-                cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+                cap = _create_video_capture(source)
                 if CAMERA_BUFFER_SIZE > 0:
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, CAMERA_BUFFER_SIZE)
                 if CAMERA_OPEN_TIMEOUT_MS > 0:
@@ -601,6 +790,7 @@ class SmartDormParkingServer:
         if frame is None:
             self.logger.error("Không chụp được frame từ camera, bỏ qua event: %s", topic)
             return
+        self._save_debug_camera_frame(camera_key, frame, "auth_event")
 
         event = SensorEvent(
             topic=normalized_topic,
@@ -740,45 +930,19 @@ class SmartDormParkingServer:
                 self.voice_queue.task_done()
 
     def _capture_frame(self, camera_key: str):
-        """Chụp nhanh 1 frame từ camera được gán theo key."""
-        if CAMERA_SNAPSHOT_FIRST:
-            snapshot_frame = self._capture_snapshot_frame(camera_key)
-            if snapshot_frame is not None:
-                return snapshot_frame
-        if camera_key.lower() in CAMERA_DISABLE_STREAM_KEYS:
-            return self._capture_snapshot_frame(camera_key)
-        lock = self.camera_locks.get(camera_key)
-        cap = self.camera_caps.get(camera_key)
-        if lock is None or cap is None:
+        """Lay frame moi nhat tu cache, khong doc camera trong luong MQTT."""
+        if not camera_key:
             return None
-        with lock:
-            ok, frame = cap.read()
-            if ok:
-                return frame.copy()
-
-            # Nếu đọc fail, thử mở lại stream và đọc lần nữa (mjpeg đôi khi timeout).
-            try:
-                source = CAMERA_SOURCES.get(camera_key)
-                if source is None:
-                    return None
-                cap.release()
-                cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
-                if CAMERA_BUFFER_SIZE > 0:
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, CAMERA_BUFFER_SIZE)
-                if CAMERA_OPEN_TIMEOUT_MS > 0:
-                    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, CAMERA_OPEN_TIMEOUT_MS)
-                if CAMERA_READ_TIMEOUT_MS > 0:
-                    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, CAMERA_READ_TIMEOUT_MS)
-                if not cap.isOpened():
-                    self.camera_caps[camera_key] = None
-                    return None
-                self.camera_caps[camera_key] = cap
-                ok, frame = cap.read()
-                if ok:
-                    return frame.copy()
-                return self._capture_snapshot_frame(camera_key)
-            except Exception:
-                return self._capture_snapshot_frame(camera_key)
+        with self.camera_cache_lock:
+            frame = self.camera_frames.get(camera_key)
+            captured_at = self.camera_frame_times.get(camera_key)
+            if frame is None or captured_at is None:
+                return None
+            age_ms = (datetime.now() - captured_at).total_seconds() * 1000
+            if CAMERA_CACHE_MAX_AGE_MS > 0 and age_ms > CAMERA_CACHE_MAX_AGE_MS:
+                self.logger.warning("Frame camera %s qua cu: %.0fms", camera_key, age_ms)
+                return None
+            return frame.copy()
 
     def _capture_snapshot_frame(self, camera_key: str):
         snapshot_url = CAMERA_SNAPSHOT_URLS.get(camera_key, "").strip()
@@ -1183,7 +1347,9 @@ class SmartDormParkingServer:
         info = self.mqtt_client.publish(servo_topic, payload="OPEN", qos=1)
         if info.rc == mqtt.MQTT_ERR_SUCCESS:
             self.logger.info("Đã publish OPEN -> %s", servo_topic)
-            self._cap_nhat_trang_thai_cong_mo(sensor_topic)
+            gate_key = self._cap_nhat_trang_thai_cong_mo(sensor_topic)
+            if gate_key:
+                self._schedule_gate_auto_close(sensor_topic, gate_key)
         else:
             self.logger.error("Publish thất bại tới %s, rc=%s", servo_topic, info.rc)
 
@@ -1201,21 +1367,74 @@ class SmartDormParkingServer:
         info = self.mqtt_client.publish(servo_topic, payload="CLOSE", qos=1)
         if info.rc == mqtt.MQTT_ERR_SUCCESS:
             self.logger.info("Đã publish CLOSE -> %s (huong=%s)", servo_topic, huong_dong)
+            self._cancel_gate_auto_close(huong_dong)
             self._set_gate_state(huong_dong, False)
             return True
 
         self.logger.error("Publish CLOSE thất bại tới %s, rc=%s", servo_topic, info.rc)
         return False
 
-    def _cap_nhat_trang_thai_cong_mo(self, sensor_topic: str) -> None:
+    def _cap_nhat_trang_thai_cong_mo(self, sensor_topic: str) -> Optional[str]:
         if sensor_topic == TOPIC_KTX_SENSOR_VAO:
             self._set_gate_state("ktx_vao_open", True)
-        elif sensor_topic == TOPIC_KTX_SENSOR_RA:
+            return "ktx_vao_open"
+        if sensor_topic == TOPIC_KTX_SENSOR_RA:
             self._set_gate_state("ktx_ra_open", True)
-        elif sensor_topic == TOPIC_BAIXE_SENSOR_VAO:
+            return "ktx_ra_open"
+        if sensor_topic == TOPIC_BAIXE_SENSOR_VAO:
             self._set_gate_state("baixe_vao_open", True)
-        elif sensor_topic == TOPIC_BAIXE_SENSOR_RA:
+            return "baixe_vao_open"
+        if sensor_topic == TOPIC_BAIXE_SENSOR_RA:
             self._set_gate_state("baixe_ra_open", True)
+            return "baixe_ra_open"
+        return None
+
+    def _schedule_gate_auto_close(self, sensor_topic: str, gate_key: str) -> None:
+        if GATE_AUTO_CLOSE_TIMEOUT_MS <= 0:
+            return
+
+        self._cancel_gate_auto_close(gate_key)
+        timer = threading.Timer(
+            GATE_AUTO_CLOSE_TIMEOUT_MS / 1000.0,
+            self._auto_close_gate_if_still_open,
+            args=(sensor_topic, gate_key),
+        )
+        timer.daemon = True
+        with self.gate_state_lock:
+            self.gate_auto_close_timers[gate_key] = timer
+        timer.start()
+        self.logger.info(
+            "Da dat timeout tu dong dong cong %s sau %sms.",
+            gate_key,
+            GATE_AUTO_CLOSE_TIMEOUT_MS,
+        )
+
+    def _cancel_gate_auto_close(self, gate_key: str) -> None:
+        with self.gate_state_lock:
+            timer = self.gate_auto_close_timers.pop(gate_key, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _auto_close_gate_if_still_open(self, sensor_topic: str, gate_key: str) -> None:
+        if self.stop_event.is_set():
+            return
+        if not self._is_gate_open(gate_key):
+            return
+
+        servo_topic = SERVO_TOPIC_MAP.get(sensor_topic)
+        if not servo_topic:
+            self.logger.error("Khong co servo topic de tu dong dong cong: %s", sensor_topic)
+            return
+
+        info = self.mqtt_client.publish(servo_topic, payload="CLOSE", qos=1)
+        if info.rc == mqtt.MQTT_ERR_SUCCESS:
+            self._set_gate_state(gate_key, False)
+            self._cancel_gate_auto_close(gate_key)
+            self._insert_log("BARRIER_AUTO_CLOSED", sensor_topic)
+            self.logger.warning("Da tu dong CLOSE -> %s sau timeout (gate=%s)", servo_topic, gate_key)
+            return
+
+        self.logger.error("Tu dong CLOSE that bai toi %s, rc=%s", servo_topic, info.rc)
 
     def _xac_dinh_huong_dong(self, sensor_topic: str) -> Optional[str]:
         """
@@ -1251,8 +1470,11 @@ class SmartDormParkingServer:
     # ==========================
     @staticmethod
     def _get_conn() -> sqlite3.Connection:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
     def _get_student(self, student_id: str) -> Optional[Dict[str, Any]]:

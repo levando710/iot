@@ -30,8 +30,10 @@ def create_app(db_path: Optional[str] = None) -> Flask:
 
     def get_db() -> sqlite3.Connection:
         if "db" not in g:
-            conn = sqlite3.connect(app.config["DATABASE"])
+            conn = sqlite3.connect(app.config["DATABASE"], timeout=10)
             conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
             conn.execute("PRAGMA foreign_keys = ON")
             g.db = conn
         return g.db

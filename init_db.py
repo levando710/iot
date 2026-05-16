@@ -12,8 +12,10 @@ def init_database(db_path: str = DB_PATH) -> None:
     """
     conn = None
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10)
         cursor = conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=10000")
 
         # Bật ràng buộc khóa ngoại trong SQLite.
         cursor.execute("PRAGMA foreign_keys = ON")
