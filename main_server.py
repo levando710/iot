@@ -1231,7 +1231,7 @@ class SmartDormParkingServer:
         if not plate:
             return False, "NO_PLATE"
 
-        vehicle = self._get_vehicle(plate)
+        plate, vehicle = self._resolve_vehicle_from_ocr_plate(plate)
         if not vehicle:
             return False, f"PLATE_NOT_REGISTERED:{plate}"
 
@@ -1322,6 +1322,109 @@ class SmartDormParkingServer:
         if len(normalized) < 6:
             return None
         return normalized
+
+    def _resolve_vehicle_from_ocr_plate(self, ocr_plate: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        candidates = self._generate_plate_ocr_candidates(ocr_plate)
+        if not candidates:
+            return ocr_plate, None
+
+        exact_vehicle = self._get_vehicle(candidates[0])
+        if exact_vehicle:
+            return candidates[0], exact_vehicle
+
+        matches = []
+        for candidate in candidates[1:]:
+            vehicle = self._get_vehicle(candidate)
+            if vehicle:
+                matches.append((candidate, vehicle))
+
+        if len(matches) == 1:
+            candidate, vehicle = matches[0]
+            self.logger.info("Da sua bien so OCR %s -> %s theo bien so trong DB.", ocr_plate, candidate)
+            return candidate, vehicle
+
+        if len(matches) > 1:
+            self.logger.warning(
+                "Bien so OCR %s co nhieu bien the khop DB: %s. Tu choi de tranh mo nham xe.",
+                ocr_plate,
+                ", ".join(candidate for candidate, _ in matches),
+            )
+        return ocr_plate, None
+
+    @staticmethod
+    def _generate_plate_ocr_candidates(plate: str) -> list[str]:
+        normalized = re.sub(r"[^A-Za-z0-9]", "", plate or "").upper()
+        if not normalized:
+            return []
+
+        candidates = [normalized]
+
+        def add(value: str) -> None:
+            if value and value not in candidates:
+                candidates.append(value)
+
+        # Bien so Viet Nam thuong co 2 so tinh, sau do la chu cai series.
+        # OCR hay doc nham chu cai series thanh so: D/O -> 0, B -> 8, S -> 5...
+        letter_slot_map = {
+            "0": "D",
+            "O": "D",
+            "Q": "D",
+            "1": "I",
+            "5": "S",
+            "8": "B",
+            "2": "Z",
+            "6": "G",
+            "7": "T",
+            "4": "A",
+        }
+        numeric_slot_map = {
+            "O": "0",
+            "Q": "0",
+            "D": "0",
+            "I": "1",
+            "L": "1",
+            "Z": "2",
+            "S": "5",
+            "B": "8",
+            "G": "6",
+            "T": "7",
+            "A": "4",
+        }
+
+        chars = list(normalized)
+        per_position_options = []
+        for index, char in enumerate(chars):
+            options = [char]
+            replacement = None
+            if index == 2:
+                replacement = letter_slot_map.get(char)
+            else:
+                replacement = numeric_slot_map.get(char)
+            if replacement and replacement not in options:
+                options.append(replacement)
+            per_position_options.append(options)
+
+        # Thu tung loi OCR rieng le truoc de tranh sinh qua nhieu bien the.
+        for index, options in enumerate(per_position_options):
+            for replacement in options[1:]:
+                variant = chars.copy()
+                variant[index] = replacement
+                add("".join(variant))
+
+        # Sau do thu to hop toi da 2 loi, du cho case bien mau 29D269927 bi doc thanh 290269927
+        # kem them mot ky tu so bi nham chu.
+        for first in range(len(chars)):
+            if len(per_position_options[first]) == 1:
+                continue
+            for second in range(first + 1, len(chars)):
+                if len(per_position_options[second]) == 1:
+                    continue
+                variant = chars.copy()
+                variant[first] = per_position_options[first][1]
+                variant[second] = per_position_options[second][1]
+                add("".join(variant))
+
+        return candidates
 
     def _get_plate_detector(self):
         if self.plate_detector is None:

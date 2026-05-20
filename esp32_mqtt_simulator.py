@@ -30,6 +30,13 @@ TOPIC_KTX_SERVO = "saban/ktx/servo"
 TOPIC_BAIXE_SERVO_VAO = "saban/baixe/servo_vao"
 TOPIC_BAIXE_SERVO_RA = "saban/baixe/servo_ra"
 
+SENSOR_OPEN_SERVO_TOPIC = {
+    "ktx_vao": TOPIC_KTX_SERVO,
+    "ktx_ra": TOPIC_KTX_SERVO,
+    "baixe_vao": TOPIC_BAIXE_SERVO_VAO,
+    "baixe_ra": TOPIC_BAIXE_SERVO_RA,
+}
+
 ALL_SENSOR_TOPICS = {
     "ktx_vao": TOPIC_KTX_SENSOR_VAO,
     "ktx_ra": TOPIC_KTX_SENSOR_RA,
@@ -65,6 +72,7 @@ class ESP32MqttSimulator:
         if username:
             self.client.username_pw_set(username, password)
         self._configure_tls_if_needed()
+        self.servo_open_events = {topic: threading.Event() for topic in ALL_SERVO_TOPICS}
 
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
@@ -125,6 +133,10 @@ class ESP32MqttSimulator:
         payload = msg.payload.decode("utf-8", errors="ignore").strip()
         now = datetime.now().strftime("%H:%M:%S")
         print(f"[{now}] [SERVO<-SERVER] Topic={msg.topic} | Payload={payload}")
+        if payload == "OPEN" and msg.topic in self.servo_open_events:
+            self.servo_open_events[msg.topic].set()
+        elif payload == "CLOSE" and msg.topic in self.servo_open_events:
+            self.servo_open_events[msg.topic].clear()
 
     def start(self) -> None:
         try:
@@ -151,6 +163,23 @@ class ESP32MqttSimulator:
         else:
             print(f"[LOI] Publish thất bại -> {topic}, rc={info.rc}")
 
+
+
+    def hold_sensor_until_open(self, sensor_key: str, retry_interval_s: float = 4.0, max_attempts: int = 5) -> None:
+        servo_topic = SENSOR_OPEN_SERVO_TOPIC[sensor_key]
+        open_event = self.servo_open_events[servo_topic]
+        open_event.clear()
+
+        for attempt in range(1, max_attempts + 1):
+            if self.stop_event.is_set():
+                return
+            print(f"[HOLD] Sensor {sensor_key} van bi che, gui DETECTED lan {attempt}/{max_attempts}")
+            self.send_sensor_event(sensor_key, PAYLOAD_DETECTED)
+            if open_event.wait(timeout=retry_interval_s):
+                print(f"[HOLD] Da nhan OPEN tu {servo_topic}, dung gui lai DETECTED")
+                return
+
+        print(f"[HOLD] Het {max_attempts} lan gui lai nhung chua nhan OPEN")
 
 
 def interactive_mode(sim: ESP32MqttSimulator) -> None:
@@ -194,6 +223,10 @@ Nhập lệnh:
                 sim.send_sensor_event(close_key, PAYLOAD_PASSED)
             else:
                 sim.send_sensor_event(mapping[cmd[1]], PAYLOAD_PASSED)
+            continue
+
+        if cmd.startswith("h") and len(cmd) == 2 and cmd[1] in mapping:
+            sim.hold_sensor_until_open(mapping[cmd[1]])
             continue
 
         if cmd in mapping:

@@ -2,3 +2,12 @@ venv/
 .venv/
 __pycache__/
 .continue/
+.env
+*.db
+*.jpg
+*.sqlite
+*.sqlite3
+temp.jpg
+debug_camera/
+test_outputs/
+~$*.docx

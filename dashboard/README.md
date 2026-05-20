@@ -1,29 +1,52 @@
-# Dashboard quản trị KTX
+# Dashboard quan ly he thong
 
-Dashboard web (Flask, server-rendered) để:
-- Xem lịch sử ra/vào (`LichSu`)
-- CRUD sinh viên (`SinhVien`)
-- CRUD phương tiện (`PhuongTien`)
+Thu muc `dashboard` chua ung dung Flask dung de quan ly du lieu va theo doi lich su hoat dong cua he thong KTX - bai xe.
 
-## Chạy nhanh
+## Chuc nang
+
+- Xem tong quan so luong sinh vien, phuong tien va lich su.
+- Quan ly sinh vien.
+- Quan ly phuong tien da dang ky.
+- Xem lich su su kien ra vao KTX va bai xe.
+- Lam viec truc tiep voi database SQLite cua server.
+
+## Chay dashboard
+
+Tu thu muc goc du an:
 
 ```powershell
-.\venv\Scripts\python.exe .\dashboard\app.py
+python .\dashboard\app.py
 ```
 
-Mở trình duyệt tại: `http://127.0.0.1:5001`
+Sau khi chay, mo trinh duyet tai:
 
-## Biến môi trường tùy chọn
+```text
+http://127.0.0.1:5001
+```
 
-- `DASHBOARD_DB_PATH`: đường dẫn tới file SQLite (mặc định: `quan_ly_ktx.db` tại thư mục project)
-- `DASHBOARD_PORT`: cổng chạy web (mặc định `5001`)
-- `DASHBOARD_SECRET_KEY`: khóa session cho Flask
+## Bien moi truong
 
-## Route chính
+| Bien | Mac dinh | Y nghia |
+| --- | --- | --- |
+| `DASHBOARD_DB_PATH` | Database mac dinh cua du an | Duong dan file SQLite |
+| `DASHBOARD_PORT` | `5001` | Cong chay dashboard |
+| `DASHBOARD_SECRET_KEY` | Gia tri phat sinh | Secret key cho Flask session |
 
-- `/dashboard`: tổng quan + log gần nhất
-- `/students`: danh sách + thêm/xóa sinh viên
-- `/students/<id>/edit`: sửa sinh viên
-- `/vehicles`: danh sách + thêm/xóa phương tiện
-- `/vehicles/<plate>/edit`: sửa phương tiện
-- `/history`: lọc lịch sử theo sự kiện/từ khóa/limit
+Neu khong cau hinh rieng, dashboard se dung database mac dinh cua server.
+
+## Cac trang chinh
+
+| Route | Chuc nang |
+| --- | --- |
+| `/dashboard` | Man hinh tong quan |
+| `/students` | Danh sach sinh vien |
+| `/students/<id>/edit` | Sua thong tin sinh vien |
+| `/vehicles` | Danh sach phuong tien |
+| `/vehicles/<plate>/edit` | Sua thong tin phuong tien |
+| `/history` | Lich su hoat dong |
+
+## Luu y
+
+- Nen chay `init_db.py` truoc khi mo dashboard lan dau.
+- Dashboard va server nen dung chung mot file database de du lieu dong bo.
+- Khong dua database that len GitHub neu database co thong tin sinh vien, bien so xe hoac anh khuon mat.

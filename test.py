@@ -82,7 +82,7 @@ def tim_nguoi_khop_theo_verify(temp_img_path, ds_anh_hop_le):
 # Mở Webcam máy tính (số 0 thường là webcam mặc định)
 cap = cv2.VideoCapture(0)
 
-# Đường dẫn đến thư mục chứa ảnh mẫu của bạn
+# Thu muc chua anh mau dung cho DeepFace.
 db_path = os.path.join(BASE_DIR, "database_khuonmat")
 
 # Biến lưu trữ kết quả để hiển thị lên màn hình (Mặc định là dòng chữ hướng dẫn)

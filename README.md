@@ -1,272 +1,221 @@
-# Hệ thống quản lý KTX & Bãi đỗ xe thông minh (Server Python)
+# He thong quan ly ra vao KTX va bai xe thong minh
 
-Server Python xử lý event từ ESP32 qua MQTT, chạy AI nhận diện khuôn mặt/biển số, xác thực SQLite và điều khiển servo mở/đóng cổng.
+Du an mo phong he thong kiem soat ra vao ky tuc xa va bai do xe bang ESP32, MQTT, camera va xu ly AI tren server Python. He thong nhan tin hieu tu cam bien hong ngoai, chup anh bang camera, xac thuc khuon mat hoac bien so, sau do gui lenh dieu khien servo mo/dong cong.
 
-Server có hỗ trợ phát âm thanh hướng dẫn tại cổng KTX khi nhận `DETECTED`:
-- "Phát hiện có người vào. Hãy đưa mặt vào camera"
-- "Phát hiện có người ra. Hãy đưa mặt vào camera"
+## Tinh nang chinh
 
-Khi xác thực khuôn mặt thành công ở cổng KTX, server sẽ phát thêm:
-- "Xác thực khuôn mặt thành công. Mời sinh viên <Họ tên> đi qua cổng"
+- Kiem soat cong KTX bang nhan dien khuon mat.
+- Kiem soat cong vao bai xe bang nhan dien bien so xe.
+- Kiem soat cong ra bai xe bang bien so xe ket hop xac thuc khuon mat chu xe.
+- Giao tiep giua ESP32 va server bang MQTT.
+- Dieu khien 3 servo rieng biet: cong KTX, cong vao bai xe, cong ra bai xe.
+- Tu dong dong cong khi xe/nguoi da di qua cam bien sau cong hoac khi het thoi gian timeout.
+- Luu lich su su kien vao SQLite.
+- Dashboard Flask de quan ly sinh vien, phuong tien va xem lich su.
+- Co simulator MQTT de test luong server khi chua co phan cung that.
 
-Khi xác thực khuôn mặt thất bại ở cổng KTX, server sẽ phát:
-- "Xác thực thất bại. Vui lòng nhìn thẳng camera và thử lại"
+## Kien truc tong quan
 
-## Kiến trúc tổng quan
-
-- **Input event** từ ESP32 qua MQTT (`DETECTED`, `PASSED`)
-- **`on_message` nhẹ**: chụp frame + route event vào queue phù hợp
-- **2 worker thread tách biệt**:
-	- `AI-Worker-KTX` xử lý queue KTX
-	- `AI-Worker-Parking` xử lý queue bãi xe
-	=> Hai pipeline độc lập, không chặn nhau ở tầng xử lý AI/DB
-- **Output control**: publish lệnh servo về ESP32
-
-Luồng này giúp tránh nghẽn callback MQTT và chống tràn RAM khi event dồn dập.
-
-## Cấu trúc chính
-
-- `init_db.py`: tạo DB `quan_ly_ktx.db` + seed dữ liệu mẫu
-- `main_server.py`: server MQTT + camera + 2 queue + 2 worker + AI + SQLite
-- `smoke_test.py`: kiểm tra nhanh DB/schema/dataset/env trước khi chạy server
-- `esp32_mqtt_simulator.py`: giả lập ESP32 gửi tín hiệu cảm biến và nhận lệnh servo
-- `database_khuonmat/`: thư mục ảnh mặt mẫu
-
-Ảnh mặt mẫu hỗ trợ 2 dạng trong cột `SinhVien.duong_dan_anh`:
-- Tên file/local path (cơ chế cũ)
-- URL `http/https` (server sẽ tự tải về `database_khuonmat/` khi khởi động)
-
-## Topics MQTT
-
-### Subscribe
-- `saban/ktx/sensor_vao`
-- `saban/ktx/sensor_ra`
-- `saban/baixe/vao/sensor1` (bãi xe vào - sensor đầu cổng)
-- `saban/baixe/vao/sensor2` (bãi xe vào - sensor cuối cổng)
-- `saban/baixe/ra/sensor1` (bãi xe ra - sensor đầu cổng)
-- `saban/baixe/ra/sensor2` (bãi xe ra - sensor cuối cổng)
-
-> Tương thích ngược: server vẫn chấp nhận `saban/baixe/sensor_vao` và `saban/baixe/sensor_ra` như topic cũ (coi như sensor1).
-
-### Publish
-- `saban/ktx/servo` -> `OPEN` / `CLOSE`
-- `saban/baixe/servo_vao` -> `OPEN` / `CLOSE`
-- `saban/baixe/servo_ra` -> `OPEN` / `CLOSE`
-
-## Quy ước payload cảm biến
-
-- `DETECTED`: cảm biến 1 (đầu vào chiều đó), server chạy xác thực AI.
-	- Nếu hợp lệ: publish `OPEN`.
-- `PASSED`: cảm biến 2 (cuối cổng), server chỉ publish `CLOSE`.
-	- Không chạy AI.
-
-### Rule đặc biệt cổng KTX
-
-Ở cổng KTX, sensor 2 của chiều này là sensor 1 của chiều ngược lại (sensor chéo):
-
-- Nếu cổng **vào KTX** đang mở mà `saban/ktx/sensor_ra` kích hoạt,
-	server hiểu đây là xe/người đã qua cổng vào và chỉ gửi `CLOSE`.
-- Nếu cổng **ra KTX** đang mở mà `saban/ktx/sensor_vao` kích hoạt,
-	server hiểu đây là xe/người đã qua cổng ra và chỉ gửi `CLOSE`.
-
-=> Tránh việc “sensor chéo” kích hoạt nhầm một lượt `DETECTED` mới.
-
-## Chuẩn bị môi trường
-
-Cài package:
-
-```powershell
-pip install -r .\requirements.txt
+```text
+Cam bien IR / ESP32
+        |
+        | MQTT DETECTED / PASSED
+        v
+MQTT Broker
+        |
+        v
+Server Python
+  - MQTT Client
+  - Camera Worker
+  - AI Worker
+  - Queue xu ly su kien
+  - SQLite
+        |
+        | MQTT OPEN / CLOSE
+        v
+ESP32 dieu khien Servo
 ```
 
-Thiết lập biến môi trường MQTT (ví dụ HiveMQ Cloud):
+## Cau truc thu muc
 
-```powershell
-$env:MQTT_HOST="your-broker-host"
-$env:MQTT_PORT="8883"
-$env:MQTT_USER="your-username"
-$env:MQTT_PASSWORD="your-password"
-$env:MQTT_CLIENT_ID="ktx-server-local"
-$env:MQTT_USE_TLS="1"
-$env:MQTT_TLS_INSECURE="0"
-$env:CAMERA_INDEX="0"
-$env:CAMERA_URL=""
-$env:CAMERA_KTX_IN_URL=""
-$env:CAMERA_KTX_IN_INDEX=""
-$env:CAMERA_KTX_OUT_URL=""
-$env:CAMERA_KTX_OUT_INDEX=""
-$env:CAMERA_PARK_IN_PLATE_URL=""
-$env:CAMERA_PARK_IN_PLATE_INDEX=""
-$env:CAMERA_PARK_OUT_PLATE_URL=""
-$env:CAMERA_PARK_OUT_PLATE_INDEX=""
-$env:CAMERA_PARK_OUT_FACE_URL=""
-$env:CAMERA_PARK_OUT_FACE_INDEX=""
-$env:QUEUE_MAXSIZE="20"
-$env:YOLO_MODEL_PATH="yolov8n.pt"
-$env:VOICE_GUIDE_ENABLED="1"
-$env:VOICE_GUIDE_RATE="160"
-$env:VOICE_GUIDE_VOLUME="1.0"
-$env:FACE_RETRY_COUNT="3"
-$env:FACE_RETRY_INTERVAL_MS="2500"
+```text
+.
+|-- main_server.py                  # Server xu ly MQTT, camera, AI va dieu khien cong
+|-- init_db.py                      # Tao database SQLite ban dau
+|-- smoke_test.py                   # Kiem tra nhanh cau hinh va cac module chinh
+|-- esp32_mqtt_simulator.py         # Gia lap ESP32 bang MQTT
+|-- ai_visual_test.py               # Test minh hoa AI de chup anh bao cao
+|-- face_capture_report_test.py     # Test chup khuon mat cho bao cao
+|-- dashboard/
+|   |-- app.py                      # Dashboard Flask
+|   `-- README.md
+|-- esp32_firmware/
+|   `-- ktx_baixe_esp32/
+|       |-- ktx_baixe_esp32.ino     # Firmware nap vao ESP32
+|       `-- README.md
+|-- data/                           # Du lieu mau, anh khuon mat, database
+|-- requirements.txt
+|-- .env.example
+`-- tomtat.md                       # Tom tat phan cung va dau noi
 ```
 
-Hoặc dùng file mẫu `.env.example` để copy sang file cấu hình của riêng bạn.
+## Cau hinh moi truong
 
-Tạo file `.env` nhanh từ mẫu:
+Tao file `.env` tu file mau:
 
 ```powershell
 Copy-Item .\.env.example .\.env
 ```
 
-Sau đó mở `.env` và điền thông tin broker thật (`MQTT_HOST`, `MQTT_USER`, `MQTT_PASSWORD`...).
+Cap nhat cac bien can thiet trong `.env`:
 
-> Với HiveMQ Cloud, mặc định nên dùng `MQTT_PORT=8883` và `MQTT_USE_TLS=1`.
+| Bien | Y nghia |
+| --- | --- |
+| `MQTT_HOST` | Dia chi MQTT broker |
+| `MQTT_PORT` | Cong MQTT, thuong la `8883` neu dung TLS |
+| `MQTT_USER` | Tai khoan MQTT |
+| `MQTT_PASSWORD` | Mat khau MQTT |
+| `MQTT_USE_TLS` | `1` neu broker dung TLS |
+| `CAMERA_KTX_IN_URL` | Camera nhan dien mat cong vao KTX |
+| `CAMERA_KTX_OUT_URL` | Camera nhan dien mat cong ra KTX |
+| `CAMERA_PARK_IN_PLATE_URL` | Camera bien so cong vao bai xe |
+| `CAMERA_PARK_OUT_PLATE_URL` | Camera bien so cong ra bai xe |
+| `CAMERA_PARK_OUT_FACE_URL` | Camera khuon mat cong ra bai xe |
+| `YOLO_MODEL_PATH` | Duong dan model phat hien bien so |
+| `FACE_RETRY_COUNT` | So lan thu lai khi xac thuc khuon mat that bai |
+| `GATE_AUTO_CLOSE_TIMEOUT_SEC` | Thoi gian tu dong dong cong neu khong co tin hieu di qua |
 
-> Với cấu hình 5 camera: đặt từng URL/INDEX cho KTX vào/ra, bãi xe vào (biển số), bãi xe ra (biển số + khuôn mặt). Nếu không set, hệ thống sẽ fallback về `CAMERA_URL` hoặc `CAMERA_INDEX`.
+Khong commit file `.env` len GitHub vi file nay co the chua tai khoan MQTT, URL camera va cac thong tin rieng tu.
 
-> Nếu muốn dùng IP Webcam, đặt `CAMERA_URL=http://<ip>:8080/video` hoặc từng `CAMERA_*_URL` theo camera cụ thể.
+## MQTT topics
 
-> Nếu không muốn phát âm thanh hướng dẫn, đặt `VOICE_GUIDE_ENABLED=0`.
+### ESP32 gui len server
 
-> Retry khuôn mặt mặc định: `FACE_RETRY_COUNT=3`, cách nhau `FACE_RETRY_INTERVAL_MS=2500` (ms).
+| Topic | Payload | Y nghia |
+| --- | --- | --- |
+| `saban/ktx/sensor_vao` | `DETECTED` | Cam bien truoc cong KTX phat hien nguoi |
+| `saban/ktx/sensor_ra` | `PASSED` | Cam bien sau cong KTX xac nhan da di qua |
+| `saban/baixe/vao/sensor1` | `DETECTED` | Cam bien truoc cong vao bai xe phat hien xe |
+| `saban/baixe/vao/sensor2` | `PASSED` | Cam bien sau cong vao bai xe xac nhan xe da qua |
+| `saban/baixe/ra/sensor1` | `DETECTED` | Cam bien truoc cong ra bai xe phat hien xe |
+| `saban/baixe/ra/sensor2` | `PASSED` | Cam bien sau cong ra bai xe xac nhan xe da qua |
 
-> Gợi ý: với production, nên dùng model YOLO đã train detect biển số thay vì `yolov8n.pt` mặc định.
+Server van ho tro cac topic cu `saban/baixe/sensor_vao` va `saban/baixe/sensor_ra` de tuong thich nguoc.
 
-## Cách chạy
+### Server gui len ESP32
 
-### 1) Khởi tạo DB
+| Topic | Payload | Y nghia |
+| --- | --- | --- |
+| `saban/ktx/servo` | `OPEN` / `CLOSE` | Mo hoac dong cong KTX |
+| `saban/baixe/servo_vao` | `OPEN` / `CLOSE` | Mo hoac dong cong vao bai xe |
+| `saban/baixe/servo_ra` | `OPEN` / `CLOSE` | Mo hoac dong cong ra bai xe |
+
+## Luong hoat dong
+
+### Cong KTX
+
+1. Cam bien truoc cong KTX phat hien nguoi va gui `DETECTED`.
+2. Server chup anh tu camera KTX.
+3. Server xac thuc khuon mat bang anh trong database.
+4. Neu hop le, server publish `OPEN` toi `saban/ktx/servo`.
+5. ESP32 quay servo mo cong.
+6. Khi cam bien sau cong phat hien nguoi da di qua, ESP32 gui `PASSED`.
+7. Server publish `CLOSE` de dong cong.
+8. Neu khong co `PASSED`, server tu dong dong cong sau timeout.
+
+### Cong vao bai xe
+
+1. Cam bien truoc cong vao bai xe gui `DETECTED`.
+2. Server chup anh bien so.
+3. Server phat hien vung bien so bang YOLO va doc ky tu bang OCR.
+4. Bien so doc duoc duoc chuan hoa truoc khi so sanh voi database.
+5. Neu bien so da dang ky, server mo servo cong vao bai xe.
+6. Cam bien sau cong gui `PASSED` khi xe di qua.
+7. Server dong cong va cap nhat lich su.
+
+### Cong ra bai xe
+
+1. Cam bien truoc cong ra gui `DETECTED`.
+2. Server doc bien so xe.
+3. Server xac dinh sinh vien so huu phuong tien trong database.
+4. Server chup va xac thuc khuon mat nguoi lay xe.
+5. Neu bien so va khuon mat khop, server mo servo cong ra.
+6. Cam bien sau cong gui `PASSED`, server dong cong va ghi lich su.
+
+## Cai dat va chay server
+
+Cai dat thu vien:
+
+```powershell
+pip install -r .\requirements.txt
+```
+
+Khoi tao database:
 
 ```powershell
 python .\init_db.py
 ```
 
-### 2) Smoke test nhanh
+Chay kiem tra nhanh:
 
 ```powershell
-.\venv\Scripts\python.exe .\smoke_test.py
+python .\smoke_test.py
 ```
 
-### 3) Chạy server
+Chay server chinh:
 
 ```powershell
-.\venv\Scripts\python.exe .\main_server.py
+python .\main_server.py
 ```
 
-## Test thực tế khi chưa có ESP32 (khuyến nghị)
-
-Mục tiêu: mô phỏng đúng luồng ESP32 -> Server -> Servo command.
-
-### Bước 1: mở Terminal A chạy server
+## Chay dashboard
 
 ```powershell
-.\venv\Scripts\python.exe .\main_server.py
+python .\dashboard\app.py
 ```
 
-### Bước 2: mở Terminal B chạy ESP32 simulator
+Mo trinh duyet tai:
+
+```text
+http://127.0.0.1:5001
+```
+
+Dashboard dung de xem lich su ra vao, them/sua/xoa sinh vien va quan ly phuong tien.
+
+## Test khong can phan cung
+
+Co the dung file simulator de gia lap ESP32:
 
 ```powershell
-.\venv\Scripts\python.exe .\esp32_mqtt_simulator.py
+python .\esp32_mqtt_simulator.py
 ```
 
-> Simulator sẽ tự đọc cấu hình MQTT từ file `.env`.
+Lenh trong simulator:
 
-### Bước 3: trong simulator nhập lệnh test
+| Lenh | Chuc nang |
+| --- | --- |
+| `1` | Gia lap cam bien KTX phat hien nguoi |
+| `2` | Gia lap cam bien KTX xac nhan da di qua |
+| `3` | Gia lap cam bien cong vao bai xe phat hien xe |
+| `4` | Gia lap cam bien cong ra bai xe phat hien xe |
+| `c1` | Gui tin hieu dong cong KTX |
+| `c2` | Gui tin hieu dong cong vao bai xe |
+| `c3` | Gui tin hieu dong cong ra bai xe |
+| `all` | Gui nhieu su kien test lien tiep |
 
-- `1`: gửi `DETECTED` ở `saban/ktx/sensor_vao` (sensor1)
-- `2`: gửi `DETECTED` ở `saban/ktx/sensor_ra` (sensor1)
-- `3`: gửi `DETECTED` ở `saban/baixe/vao/sensor1` (sensor1)
-- `4`: gửi `DETECTED` ở `saban/baixe/ra/sensor1` (sensor1)
-- `c1`: gửi `PASSED` ở `saban/ktx/sensor_vao` (sensor2)
-- `c2`: gửi `PASSED` ở `saban/ktx/sensor_ra` (sensor2)
-- `c3`: gửi `PASSED` ở `saban/baixe/vao/sensor2` (sensor2)
-- `c4`: gửi `PASSED` ở `saban/baixe/ra/sensor2` (sensor2)
-- `all`: gửi tuần tự 4 lệnh `DETECTED`
+## Luu y khi dua len GitHub
 
-Nếu nhận diện hợp lệ, simulator sẽ in lệnh từ server, ví dụ:
-- `Topic=saban/ktx/servo | Payload=OPEN`
-- `Topic=saban/baixe/servo_vao | Payload=OPEN`
-- `Topic=saban/baixe/servo_ra | Payload=OPEN`
+- Khong dua file `.env`, database that, anh khuon mat that hoac URL camera noi bo len repository cong khai.
+- Dung `.env.example` de mo ta cau hinh can thiet.
+- Neu can dua anh minh hoa len bao cao, nen dung anh demo hoac anh da che thong tin ca nhan.
+- Neu su dung model AI rieng, nen ghi ro cach tai model thay vi commit file model dung luong lon.
 
-Khi cảm biến 2 kích hoạt (`PASSED`), simulator sẽ nhận:
-- `Topic=saban/ktx/servo | Payload=CLOSE`
-- `Topic=saban/baixe/servo_vao | Payload=CLOSE`
-- `Topic=saban/baixe/servo_ra | Payload=CLOSE`
+## Su co thuong gap
 
-### Kịch bản test demo khuyến nghị
-
-#### 1) Người vào KTX
-1. Gửi `1` (`DETECTED` vào KTX) -> kỳ vọng `OPEN`.
-2. Sau khi qua cổng, gửi `c2` (sensor chéo chiều ra) -> kỳ vọng `CLOSE`.
-
-#### 2) Người ra KTX
-1. Gửi `2` (`DETECTED` ra KTX) -> kỳ vọng `OPEN`.
-2. Sau khi qua cổng, gửi `c1` (sensor chéo chiều vào) -> kỳ vọng `CLOSE`.
-
-#### 3) Xe vào bãi
-1. Gửi `3` (`DETECTED` tại `saban/baixe/vao/sensor1`) -> kỳ vọng `OPEN`.
-2. Xe qua cảm biến 2, gửi `c3` (`PASSED` tại `saban/baixe/vao/sensor2`) -> kỳ vọng `CLOSE`.
-
-#### 4) Xe ra bãi
-1. Gửi `4` (`DETECTED` tại `saban/baixe/ra/sensor1`) -> kỳ vọng `OPEN`.
-2. Xe qua cảm biến 2, gửi `c4` (`PASSED` tại `saban/baixe/ra/sensor2`) -> kỳ vọng `CLOSE`.
-
-## Test khi có ESP32 thật
-
-1. ESP32 publish payload `DETECTED` từ cảm biến 1 theo chiều vào/ra.
-	- Bãi xe vào: `saban/baixe/vao/sensor1`
-	- Bãi xe ra: `saban/baixe/ra/sensor1`
-2. Server nhận sự kiện, xử lý AI, kiểm tra SQLite.
-3. Nếu hợp lệ, server publish `OPEN` về topic servo tương ứng.
-4. Khi đối tượng qua cảm biến 2, ESP32 publish payload `PASSED`.
-	- Bãi xe vào: `saban/baixe/vao/sensor2`
-	- Bãi xe ra: `saban/baixe/ra/sensor2`
-5. Server publish `CLOSE` để đóng barie.
-
-Checklist ESP32 firmware:
-- Subscribe: `saban/ktx/servo`, `saban/baixe/servo_vao`, `saban/baixe/servo_ra`
-- Publish khi sensor1 trigger: `DETECTED`
-- Publish khi sensor2 trigger: `PASSED`
-- Parse payload servo: `OPEN` để mở cổng, `CLOSE` để đóng cổng
-
-## Edge cases đã xử lý
-
-- Queue đầy: drop event và ghi log DB (`QUEUE_FULL_DROP`)
-- Camera lỗi frame: bỏ event, không treo callback
-- Lỗi AI (DeepFace/YOLO/OCR): ghi log và tiếp tục xử lý event sau
-- Lỗi DB cục bộ: catch `sqlite3.Error`, không làm sập toàn bộ server
-
-## Troubleshooting nhanh
-
-- **`Thiếu MQTT_HOST`**: chưa set env CloudMQTT
-- **`Không tìm thấy DB`**: chưa chạy `init_db.py`
-- **`No item found in database_khuonmat`**: ảnh mặt mẫu chưa đủ rõ/không detect được
-- **Import lỗi `paho.mqtt.client`**: chưa cài dependencies
-
-## Gợi ý nâng cấp tiếp
-
-- Dùng 2 camera riêng cho KTX/Bãi xe (thay camera dùng chung)
-- Thêm retry + reconnect MQTT có backoff
-- Dùng cache embedding khuôn mặt và batch OCR để tăng tốc
-- Bổ sung test tự động cho topic routing và DB transaction
-
-## Dashboard quản trị (mới)
-
-Bạn có thể dùng dashboard web để:
-- Xem lịch sử ra/vào (`LichSu`)
-- Thêm/sửa/xóa sinh viên (`SinhVien`)
-- Thêm/sửa/xóa phương tiện (`PhuongTien`)
-
-Mã nguồn dashboard nằm ở thư mục `dashboard/`.
-
-Chạy dashboard:
-
-```powershell
-.\venv\Scripts\python.exe .\dashboard\app.py
-```
-
-Mở trình duyệt tại: `http://127.0.0.1:5001`
-
-Biến môi trường tùy chọn:
-- `DASHBOARD_DB_PATH`: đường dẫn SQLite (mặc định `quan_ly_ktx.db`)
-- `DASHBOARD_PORT`: cổng chạy web (mặc định `5001`)
-- `DASHBOARD_SECRET_KEY`: secret key cho session Flask
+| Hien tuong | Huong kiem tra |
+| --- | --- |
+| MQTT bao `rc=5` | Sai username/password, sai port, sai TLS hoac broker chua cho phep ket noi |
+| Khong thay message tren HiveMQ | Kiem tra topic subscribe `saban/#`, WiFi ESP32 va MQTT broker |
+| Servo chi quay mot lan | Kiem tra nguon servo, noi chung GND voi ESP32, test topic `OPEN`/`CLOSE` dung servo |
+| Cam bien LM393 bi nguoc trang thai | Doi gia tri `SENSOR_ACTIVE_LOW` trong firmware |
+| Bien so doc sai chu cai/so | Kiem tra anh co ro net, goc chup, anh sang va logic chuan hoa bien so |
